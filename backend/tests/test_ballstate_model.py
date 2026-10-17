@@ -104,6 +104,11 @@ def test_slim_state_simulates_exactly_like_the_full_state(bb_matches, logit_mode
     full = simulate_heldout(logit_model, copy.deepcopy(state), target, n=60, seed=3)
     slim_state = state.slim_for(target)
     slim = simulate_heldout(logit_model, slim_state, target, n=60, seed=3)
-    assert full == slim
+    assert full.keys() == slim.keys()
+    for k in full:
+        if isinstance(full[k], np.ndarray):
+            assert np.array_equal(full[k], slim[k], equal_nan=True), k
+        else:
+            assert full[k] == slim[k], k
     assert len(slim_state.rivalry) < len(state.rivalry)
     assert len(slim_state.bat) < len(state.bat)

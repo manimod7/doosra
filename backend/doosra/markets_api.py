@@ -136,7 +136,8 @@ def register(app: FastAPI, store: Store, models_dir: str, require_admin, cricshe
     def run(body: MatchIn, live: LiveState | None):
         setup = setup_from(body)
         try:
-            return setup, simulate_match(art().model, art().state, setup, n=body.sims, seed=body.seed, live=live)
+            return setup, simulate_match(art().model, art().state, setup, n=body.sims, seed=body.seed, live=live,
+                                         volatility=getattr(art(), "volatility", 0.0))
         except ValueError as e:
             raise HTTPException(422, str(e))
 

@@ -23,6 +23,13 @@ RUNS = np.array(CLASS_RUNS)
 IS_LEGAL = np.array(LEGAL)
 SWAP = np.zeros(8, dtype=bool)
 SWAP[[ONE, THREE]] = True
+# Match-day factor. Real matches vary as a whole (a flat deck, dew, a two-paced pitch), so
+# balls within one match are not independent. Each simulation draws one "day" value z,
+# shared by both innings, and every ball's probabilities are tilted by exp(z * DAY_TILT):
+# z > 0 is a batting day (more boundaries, fewer dots and wickets). How spread out z is
+# (the volatility) is fitted on held-out matches in lifecycle.evaluate.
+#                    dot   1    2    3    4    6    wkt  extra
+DAY_TILT = np.array([-0.3, 0.0, 0.2, 0.3, 0.6, 0.9, -0.6, 0.0])
 
 
 @dataclass
@@ -88,6 +95,7 @@ class SimResult:
     batted_first: np.ndarray         # N, index of team that batted first
     winner: np.ndarray               # N, 0/1 team index, 0.5 tie
     model_note: str = ""
+    day: np.ndarray | None = None    # N, the match-day factor each simulation drew
 
     def win_prob(self, team: str) -> float:
         i = self.teams.index(team)
@@ -113,7 +121,7 @@ def _choose_bowlers(rng, k_idx, shares, overs_bowled, last, quota, phase):
 
 def simulate_innings(model: BallModel, state: CricketState, setup: MatchSetup, batting: str, bowling: str,
                      n: int, rng: np.random.Generator, innings_no: int, target: np.ndarray | None,
-                     live: LiveState | None = None) -> InningsSim:
+                     live: LiveState | None = None, day: np.ndarray | None = None) -> InningsSim:
     lineup = setup.lineups[batting].batting[:11]
     bowlers = setup.lineups[bowling].bowlers
     nb, nw, overs = len(lineup), len(bowlers), setup.overs_limit
@@ -197,6 +205,9 @@ def simulate_innings(model: BallModel, state: CricketState, setup: MatchSetup, b
         dyn = dynamic_features(over_no, legal[act], wk[act], faced[act, st], inn2[act],
                                score[act], tgt[act], overs)
         P = model.predict_proba(np.hstack([S[st, bw], dyn]))
+        if day is not None:
+            P = P * np.exp(day[act][:, None] * DAY_TILT)
+            P /= P.sum(axis=1, keepdims=True)
         cls = (rng.random(len(act))[:, None] > np.cumsum(P, axis=1)).sum(axis=1).clip(0, 7)
         r = RUNS[cls]
         lg = IS_LEGAL[cls]
@@ -284,8 +295,13 @@ def _merge(parts: list[tuple[np.ndarray, InningsSim]], n: int, team: str, overs:
 
 
 def simulate_match(model: BallModel, state: CricketState, setup: MatchSetup, n: int = 2000,
-                   seed: int = 0, live: LiveState | None = None) -> SimResult:
+                   seed: int = 0, live: LiveState | None = None, volatility: float = 0.0,
+                   day: np.ndarray | None = None) -> SimResult:
+    """volatility: spread of the match-day factor (0 = balls independent given the features).
+    day: explicit per-simulation factors, used by evaluation to sample a wide proposal."""
     rng = np.random.default_rng(seed)
+    if day is None and volatility > 0:
+        day = rng.normal(0.0, volatility, n)
     a, b = setup.teams
     for t in setup.teams:
         if t not in setup.lineups:
@@ -305,24 +321,25 @@ def simulate_match(model: BallModel, state: CricketState, setup: MatchSetup, n: 
             continue
         bat1, bat2 = setup.teams[fi], setup.teams[1 - fi]
         k = len(idx)
+        dsub = day[idx] if day is not None else None
         if live is not None and live.innings == 2:
             if live.target is None:
                 raise ValueError("live second innings needs a target")
             s1 = _known_innings(bat1, live.target - 1, k, setup.overs_limit)
             tgt = np.full(k, float(live.target))
-            s2 = simulate_innings(model, state, setup, bat2, bat1, k, rng, 2, tgt, live)
+            s2 = simulate_innings(model, state, setup, bat2, bat1, k, rng, 2, tgt, live, dsub)
         else:
             s1 = simulate_innings(model, state, setup, bat1, bat2, k, rng, 1, None,
-                                  live if live is not None else None)
+                                  live if live is not None else None, dsub)
             tgt = s1.total + 1
-            s2 = simulate_innings(model, state, setup, bat2, bat1, k, rng, 2, tgt)
+            s2 = simulate_innings(model, state, setup, bat2, bat1, k, rng, 2, tgt, None, dsub)
         parts[bat1].append((idx, s1))
         parts[bat2].append((idx, s2))
         w2 = s2.total >= tgt
         tie = s2.total == tgt - 1
         winner[idx] = np.where(tie, 0.5, np.where(w2, 1 - fi, fi))
     innings = {t: _merge(parts[t], n, t, setup.overs_limit) for t in setup.teams}
-    return SimResult(setup.teams, n, innings, first_idx, winner)
+    return SimResult(setup.teams, n, innings, first_idx, winner, day=day)
 
 
 def _known_innings(team: str, total: int, n: int, overs: int) -> InningsSim:

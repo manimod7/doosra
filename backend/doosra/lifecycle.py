@@ -62,6 +62,7 @@ class BallArtifact:
     pools: tuple[str, ...]
     feature_names: tuple[str, ...]
     evaluation: dict = field(default_factory=dict)
+    volatility: float = 0.0       # match-day factor spread for simulate_match (older artefacts: 0)
 
 
 def _pit(sim_vals: np.ndarray, actual: float, rng: np.random.Generator) -> float:
@@ -70,8 +71,18 @@ def _pit(sim_vals: np.ndarray, actual: float, rng: np.random.Generator) -> float
     return float(lo + rng.random() * eq)   # randomised PIT for discrete outcomes
 
 
-def simulate_heldout(model: BallModel, state: CricketState, m: BBMatch, n: int, seed: int) -> dict | None:
-    """Simulate a finished match from its real lineups and compare with what happened."""
+PROPOSAL = 0.35                    # spread of match-day factors sampled during evaluation
+VOL_GRID = tuple(round(x, 3) for x in np.arange(0.0, 0.301, 0.025))
+HELDOUT_MARKETS = ("total", "session6")
+
+
+def simulate_heldout(model: BallModel, state: CricketState, m: BBMatch, n: int, seed: int,
+                     proposal: float = PROPOSAL) -> dict | None:
+    """Simulate a finished match from its real lineups, keeping the raw simulated values.
+
+    The simulations draw match-day factors from a wide normal (the proposal), so one run
+    can be re-weighted afterwards to what any narrower volatility would have predicted.
+    """
     if len(m.innings) < 2 or not m.batting_first:
         return None
     lineups = {}
@@ -83,24 +94,113 @@ def simulate_heldout(model: BallModel, state: CricketState, m: BBMatch, n: int, 
         lineups[t] = Lineup(bat, bowl)
     setup = MatchSetup(m.pool, m.venue, m.teams, lineups, m.overs_limit, batting_first=m.batting_first,
                        toss_winner=m.toss_winner)
-    sim = simulate_match(model, state, setup, n=n, seed=seed)
+    day = np.random.default_rng(seed + 10_000).normal(0.0, proposal, n) if proposal > 0 else None
+    sim = simulate_match(model, state, setup, n=n, seed=seed, day=day)
     real = sim_from_match(m)
-    rng = np.random.default_rng(seed)
     first = m.batting_first
-    out = {"match_id": m.match_id}
+    out = {"match_id": m.match_id, "year": m.date.year, "seed": seed, "proposal": proposal,
+           "day": day if day is not None else np.zeros(n)}
     for key, spec in (("total", MarketSpec("team_total", team=first)),
                       ("session6", MarketSpec("session", team=first, overs=min(6, m.overs_limit)))):
-        sv = market_values(sim, spec)
-        actual = float(market_values(real, spec)[0])
-        line = float(np.floor(np.nanmedian(sv))) + 0.5
-        p_over = float(np.nanmean(sv > line))
-        out[f"{key}_pit"] = _pit(sv, actual, rng)
-        out[f"{key}_in80"] = bool(np.nanpercentile(sv, 10) <= actual <= np.nanpercentile(sv, 90))
-        out[f"{key}_brier"] = (p_over - float(actual > line)) ** 2
+        out[key] = market_values(sim, spec)
+        out[f"{key}_actual"] = float(market_values(real, spec)[0])
     if m.winner:
-        p = sim.win_prob(m.winner)
-        out["winner_ll"] = float(-np.log(np.clip(p, 1e-6, 1)))
+        i = sim.teams.index(m.winner)
+        out["winner_hit"] = np.where(sim.winner == 0.5, 0.5, (sim.winner == i).astype(float))
     return out
+
+
+def _weights(day: np.ndarray, proposal: float, sigma: float) -> np.ndarray:
+    """Importance weights turning proposal-spread simulations into sigma-spread ones."""
+    if proposal <= 0:
+        return np.ones_like(day) / len(day)
+    s = max(sigma, 0.01)                  # sigma -> 0 is a point mass; 0.01 is indistinguishable
+    logw = -0.5 * (day / s) ** 2 + 0.5 * (day / proposal) ** 2
+    w = np.exp(logw - logw.max())
+    return w / w.sum()
+
+
+def _wquantile(v: np.ndarray, w: np.ndarray, q: float) -> float:
+    o = np.argsort(v)
+    c = np.cumsum(w[o])
+    return float(v[o][min(np.searchsorted(c, q * c[-1]), len(v) - 1)])
+
+
+def _wcrps(v: np.ndarray, w: np.ndarray, a: float) -> float:
+    """Continuous ranked probability score of a weighted sample (lower is better)."""
+    w = w / w.sum()
+    # E|X - X'| over distinct pairs only: counting each draw against itself biases CRPS
+    # against narrow forecasts, which rely on fewer effective draws after re-weighting.
+    spread = (w @ np.abs(v[:, None] - v[None, :]) @ w) / max(1.0 - float(w @ w), 1e-9)
+    return float(w @ np.abs(v - a) - 0.5 * spread)
+
+
+def score_heldout(r: dict, sigma: float, rng: np.random.Generator) -> dict:
+    """Coverage, PIT, Brier, CRPS and winner log loss for one held-out match at a volatility."""
+    w_all = _weights(r["day"], r["proposal"], sigma)
+    out: dict = {}
+    for key in HELDOUT_MARKETS:
+        v, a = r[key], r[f"{key}_actual"]
+        ok = ~np.isnan(v)
+        if not ok.any():
+            continue
+        v, w = v[ok], w_all[ok] / w_all[ok].sum()
+        line = float(np.floor(_wquantile(v, w, 0.5))) + 0.5
+        p_over = float(w[v > line].sum())
+        out[f"{key}_in80"] = bool(_wquantile(v, w, 0.1) <= a <= _wquantile(v, w, 0.9))
+        out[f"{key}_pit"] = float(w[v < a].sum() + rng.random() * w[v == a].sum())
+        out[f"{key}_brier"] = (p_over - float(a > line)) ** 2
+        out[f"{key}_crps"] = _wcrps(v, w, a)
+    if "winner_hit" in r:
+        out["winner_ll"] = float(-np.log(np.clip(w_all @ r["winner_hit"], 1e-6, 1)))
+    return out
+
+
+def _summarise(scored: list[dict]) -> dict:
+    rep: dict = {"sim_matches": len(scored)}
+    for key in HELDOUT_MARKETS:
+        rows = [s for s in scored if f"{key}_in80" in s]
+        if rows:
+            rep[f"{key}_coverage80"] = float(np.mean([s[f"{key}_in80"] for s in rows]))
+            rep[f"{key}_brier"] = float(np.mean([s[f"{key}_brier"] for s in rows]))
+            rep[f"{key}_crps"] = float(np.mean([s[f"{key}_crps"] for s in rows]))
+            rep[f"{key}_pit_hist"] = np.histogram([s[f"{key}_pit"] for s in rows], bins=5, range=(0, 1))[0].tolist()
+    wl = [s["winner_ll"] for s in scored if "winner_ll" in s]
+    if wl:
+        rep["winner_log_loss"] = float(np.mean(wl))
+    return rep
+
+
+def _crps_at(raw: list[dict], sigma: float, seed: int) -> float:
+    rng = np.random.default_rng(seed)
+    sc = [score_heldout(r, sigma, rng) for r in raw]
+    vals = [s[f"{k}_crps"] / max(np.std(r[k][~np.isnan(r[k])]) if (~np.isnan(r[k])).any() else 1, 1)
+            for s, r in zip(sc, raw) for k in HELDOUT_MARKETS if f"{k}_crps" in s]
+    return float(np.mean(vals)) if vals else float("inf")
+
+
+def fit_volatility(raw: list[dict], seed: int = 0) -> dict:
+    """Choose the match-day volatility, and report how it does on seasons it was not fitted on.
+
+    For each test season: fit the volatility on the other seasons' held-out matches (lowest
+    CRPS), then score that season with it. The cross-season scores are what the gate sees.
+    The volatility shipped with the model is the one fitted on every season.
+    """
+    rng = np.random.default_rng(seed)
+    years = sorted({r["year"] for r in raw})
+    chosen: dict = {}
+    scored: list[dict] = []
+    for yr in years:
+        train = [r for r in raw if r["year"] != yr] or [r for r in raw if r["year"] == yr]
+        best = min(VOL_GRID, key=lambda s: _crps_at(train, s, seed))
+        chosen[yr] = best
+        scored += [score_heldout(r, best, rng) for r in raw if r["year"] == yr]
+    final = min(VOL_GRID, key=lambda s: _crps_at(raw, s, seed))
+    rep = _summarise(scored)
+    without = _summarise([score_heldout(r, 0.0, np.random.default_rng(seed)) for r in raw])
+    rep |= {"volatility": float(final), "volatility_by_season": {str(k): v for k, v in chosen.items()},
+            "total_coverage80_without_volatility": without.get("total_coverage80")}
+    return rep
 
 
 def evaluate(matches: list[BBMatch], test_years: int = 3, kinds=("hgb", "logit"), max_iter: int = 150,
@@ -134,7 +234,7 @@ def evaluate(matches: list[BBMatch], test_years: int = 3, kinds=("hgb", "logit")
         ll_base.append(llb * te.sum())
         n_balls += int(te.sum())
         for j, i in enumerate(sample.get(yr, [])):
-            r = simulate_heldout(choice.model, snaps[i], matches[i], n_sims, seed + j)
+            r = simulate_heldout(choice.model, snaps.pop(i), matches[i], n_sims, seed + j)
             if r:
                 sims.append(r)
         folds.append({"year": yr, "train_balls": int(tr.sum()), "test_balls": int(te.sum()),
@@ -149,14 +249,7 @@ def evaluate(matches: list[BBMatch], test_years: int = 3, kinds=("hgb", "logit")
         "sim_matches": len(sims),
     }
     if sims:
-        for key in ("total", "session6"):
-            report[f"{key}_coverage80"] = float(np.mean([s[f"{key}_in80"] for s in sims]))
-            report[f"{key}_brier"] = float(np.mean([s[f"{key}_brier"] for s in sims]))
-            pits = np.array([s[f"{key}_pit"] for s in sims])
-            report[f"{key}_pit_hist"] = np.histogram(pits, bins=5, range=(0, 1))[0].tolist()
-        wl = [s["winner_ll"] for s in sims if "winner_ll" in s]
-        if wl:
-            report["winner_log_loss"] = float(np.mean(wl))
+        report |= fit_volatility(sims, seed)
     return {"report": report, "X": X, "y": y, "dates": dates, "state": final_state}
 
 
@@ -202,7 +295,7 @@ class BallRegistry:
     def record(self, art: BallArtifact, promoted: bool, reason: str) -> dict:
         meta = {"version": art.version, "file": f"ball-{art.version}.joblib",
                 "trained_through": art.trained_through.isoformat(), "pools": list(art.pools),
-                "promoted": promoted, "reason": reason,
+                "promoted": promoted, "reason": reason, "volatility": art.volatility,
                 "report": {k: v for k, v in art.evaluation.items() if k != "folds"},
                 "folds": art.evaluation.get("folds", []),
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
@@ -249,6 +342,7 @@ def retrain_ball(matches: list[BBMatch], models_dir: str | Path, pools: tuple[st
     report = ev["report"] | {"chosen": choice.scores["chosen"], "recent_comparison": recent}
     ok, reason = gate(report, champ_meta, trained_through, recent, min_balls=min_balls)
     art = BallArtifact(datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"), choice.model, ev["state"],
-                       trained_through, tuple(pools), tuple(FEATURE_NAMES), report)
+                       trained_through, tuple(pools), tuple(FEATURE_NAMES), report,
+                       volatility=float(report.get("volatility", 0.0)))
     meta = reg.record(art, ok, reason)
     return {"promoted": ok, "reason": reason, "report": report, "meta": meta}

@@ -229,3 +229,44 @@ def test_download_is_restricted_to_cricsheet(tmp_path):
     for bad in ("../etc/passwd", "https://evil.example/x.zip", "t20s.json"):
         with pytest.raises(ValueError):
             download_cricsheet(bad, tmp_path, transport=httpx.MockTransport(handler))
+
+
+def _fake_heldout(n_matches, true_sigma, seed, proposal=0.35, n=400):
+    """Held-out 'simulations' where a total is 150 * (1 + 0.8 z) + noise, and the real
+    total came from a day factor with spread true_sigma. Fitting must find true_sigma."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(n_matches):
+        mu = rng.normal(155, 10)
+        day = rng.normal(0, proposal, n)
+        v = np.round(mu * (1 + 0.8 * day) + rng.normal(0, 14, n))
+        z = rng.normal(0, true_sigma)
+        a = round(mu * (1 + 0.8 * z) + rng.normal(0, 14))
+        s6 = np.round(v * 0.3); a6 = round(a * 0.3)
+        out.append({"match_id": str(i), "year": 2024 + i % 3, "seed": i, "proposal": proposal, "day": day,
+                    "total": v, "total_actual": float(a), "session6": s6, "session6_actual": float(a6),
+                    "winner_hit": (rng.random(n) < 0.5).astype(float)})
+    return out
+
+
+def test_volatility_fit_recovers_the_planted_spread():
+    from doosra.lifecycle import fit_volatility
+    rep = fit_volatility(_fake_heldout(150, 0.15, seed=1))
+    assert abs(rep["volatility"] - 0.15) <= 0.05, rep["volatility"]
+    assert abs(rep["total_coverage80"] - 0.8) < 0.1          # judged on seasons it was not fitted on
+    assert rep["total_coverage80_without_volatility"] < 0.65  # ignoring match days is clearly too narrow
+
+
+def test_no_planted_spread_fits_near_zero():
+    from doosra.lifecycle import fit_volatility
+    rep = fit_volatility(_fake_heldout(150, 0.0, seed=2))
+    assert rep["volatility"] <= 0.05
+
+
+def test_weights_at_the_proposal_are_uniform():
+    import numpy as np
+    from doosra.lifecycle import _weights
+    day = np.random.default_rng(0).normal(0, 0.35, 500)
+    w = _weights(day, 0.35, 0.35)
+    assert np.allclose(w, 1 / 500)

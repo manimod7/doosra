@@ -154,3 +154,19 @@ def test_settle_rules(bb_matches):
     assert settle(m, MarketSpec("team_total", team=first), float(total)) is None     # push
     assert settle(m, MarketSpec("match_winner", team=m.winner), None) == 1.0
     assert settle(m, MarketSpec("player_runs", player="Nobody"), 10.5) is None        # void, not a loss
+
+
+def test_match_day_volatility_widens_totals_but_zero_changes_nothing(logit_model, state):
+    import numpy as np
+    from doosra.simulate import simulate_match, default_setup
+    setup = default_setup(state, "T20:male", "Neutral Park", "Team A", "Team B", batting_first="Team A")
+    base = simulate_match(logit_model, state, setup, n=600, seed=11)
+    zero = simulate_match(logit_model, state, setup, n=600, seed=11, volatility=0.0)
+    wide = simulate_match(logit_model, state, setup, n=600, seed=11, volatility=0.25)
+    assert np.array_equal(base.innings["Team A"].total, zero.innings["Team A"].total)
+    assert wide.day is not None and base.day is None
+    assert wide.innings["Team A"].total.std() > base.innings["Team A"].total.std() * 1.15
+    # batting days really score more
+    hi = wide.day > 0.15
+    lo = wide.day < -0.15
+    assert wide.innings["Team A"].total[hi].mean() > wide.innings["Team A"].total[lo].mean() + 10
