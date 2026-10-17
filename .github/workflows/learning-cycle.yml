@@ -1,0 +1,41 @@
+name: Learning cycle
+
+# Weekly: download fresh Cricsheet data, settle every logged prediction, recalibrate,
+# retrain behind the promotion gate, and publish the winning model to the database
+# (Neon), where the API on Cloud Run picks it up on its next start.
+# Runs on GitHub's free runners, so training never loads the API server.
+on:
+  schedule:
+    - cron: "40 21 * * 0"   # Monday 03:10 IST
+  workflow_dispatch:
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DOOSRA_DB: ${{ secrets.DOOSRA_DB }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check the database secret
+        run: test -n "$DOOSRA_DB" || { echo "Add the Neon connection string as the DOOSRA_DB repository secret"; exit 1; }
+      - run: pip install -e ".[cloud]"
+      - name: Download Cricsheet data (every format; the cycle uses men's T20)
+        run: python -m doosra.pipeline download all_json.zip
+      - name: Run the learning cycle
+        # pulls the live models from the database first and pushes the winners back after
+        run: python -m doosra.pipeline cycle data/raw/all_json.zip --models-dir models > cycle-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: learning-cycle-${{ github.run_number }}
+          path: |
+            backend/cycle-report.json
+            backend/models/ball/champion.json
+            backend/models/ball/history.jsonl

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.env
+.env.local
+data/raw/*
+!data/raw/.gitkeep
+backend/data/
+backend/models/
+node_modules/
+.next/
+backend/real/
+*.tsbuildinfo
+*.sqlite
+*.joblib

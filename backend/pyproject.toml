@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doosra"
+version = "0.2.0"
+description = "Cricket odds comparison and bet analysis (personal use)"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27",
+  "numpy>=1.26", "scikit-learn>=1.4", "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]
+cloud = ["psycopg[binary]>=3.2"]
+dev = ["pytest>=8", "anthropic>=0.40"]
+
+[tool.setuptools.packages.find]
+include = ["doosra*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["slow: end-to-end learning-cycle tests (run in CI; skip locally with -m 'not slow')"]

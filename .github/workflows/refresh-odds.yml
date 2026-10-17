@@ -1,0 +1,21 @@
+name: Refresh odds
+
+# Twice a day: 3 cricket feeds x 2 regions = 6 credits per run, about 360 a month
+# on the free 500-credit plan. The API's own budget guard stops early regardless.
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 08:47 IST
+    - cron: "17 11 * * *"  # 16:47 IST
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the Doosra API
+        env:
+          API_URL: ${{ secrets.DOOSRA_API_URL }}
+          TOKEN: ${{ secrets.DOOSRA_ADMIN_TOKEN }}
+        run: |
+          test -n "$API_URL" && test -n "$TOKEN" || { echo "Set DOOSRA_API_URL and DOOSRA_ADMIN_TOKEN repo secrets"; exit 1; }
+          curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "$API_URL/admin/refresh"
