@@ -10,7 +10,7 @@ backend/data/
 backend/models/
 node_modules/
 .next/
-backend/real/
+real/
 *.tsbuildinfo
 *.sqlite
 *.joblib
