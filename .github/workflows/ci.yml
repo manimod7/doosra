@@ -5,6 +5,13 @@ on:
   pull_request:
 
 jobs:
+  secrets:
+    # keys, passwords and connection strings must never be committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-secrets.sh
+
   backend:
     runs-on: ubuntu-latest
     services:
