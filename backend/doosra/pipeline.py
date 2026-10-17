@@ -80,8 +80,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("command", choices=["cycle", "download"])
     ap.add_argument("data", help="Cricsheet zip path (cycle) or archive name (download)")
     ap.add_argument("--models-dir", default="models")
-    ap.add_argument("--db", default=os.environ.get("DOOSRA_DB", "data/doosra.sqlite"),
-                    help="SQLite path or postgresql:// URL (default: $DOOSRA_DB)")
+    ap.add_argument("--db", default=os.environ.get("DOOSRA_DB") or os.environ.get("DATABASE_URL") or "data/doosra.sqlite",
+                    help="SQLite path or postgresql:// URL (default: $DOOSRA_DB, then $DATABASE_URL)")
     ap.add_argument("--pools", nargs="+", default=["T20:male"])
     ap.add_argument("--weather", action="store_true")
     ap.add_argument("--test-years", type=int, default=3)

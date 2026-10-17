@@ -152,3 +152,14 @@ def test_failed_statement_does_not_poison_the_connection(store):
     with pytest.raises(Exception):
         store._conn.execute("SELECT * FROM no_such_table")
     assert store.bets() == []
+
+
+def test_database_url_is_used_when_doosra_db_is_unset(monkeypatch):
+    from doosra.api import db_target
+    monkeypatch.delenv("DOOSRA_DB", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@host/db")
+    assert db_target() == "postgresql://u:p@host/db"
+    monkeypatch.setenv("DOOSRA_DB", "local.sqlite")
+    assert db_target() == "local.sqlite"
+    monkeypatch.delenv("DOOSRA_DB"); monkeypatch.delenv("DATABASE_URL")
+    assert db_target() == "data/doosra.sqlite"

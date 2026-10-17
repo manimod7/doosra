@@ -41,6 +41,11 @@ SPORT_TITLES = {
 }
 
 
+def db_target() -> str:
+    """DOOSRA_DB, else DATABASE_URL (what Neon's tools and integrations write), else a local file."""
+    return os.environ.get("DOOSRA_DB") or os.environ.get("DATABASE_URL") or "data/doosra.sqlite"
+
+
 @dataclass
 class Settings:
     db_path: str = "data/doosra.sqlite"
@@ -54,7 +59,7 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
-            db_path=os.environ.get("DOOSRA_DB", "data/doosra.sqlite"),
+            db_path=db_target(),
             odds_api_key=os.environ.get("DOOSRA_ODDS_API_KEY") or None,
             admin_token=os.environ.get("DOOSRA_ADMIN_TOKEN") or None,
             models_dir=os.environ.get("DOOSRA_MODELS_DIR", "models"),
