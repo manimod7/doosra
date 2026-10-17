@@ -62,7 +62,7 @@ class BallArtifact:
     pools: tuple[str, ...]
     feature_names: tuple[str, ...]
     evaluation: dict = field(default_factory=dict)
-    volatility: float = 0.0       # match-day factor spread for simulate_match (older artefacts: 0)
+    volatility: float | dict = 0.0   # match-day spread, per stratum (see volatility_for); old artefacts: 0
 
 
 def _pit(sim_vals: np.ndarray, actual: float, rng: np.random.Generator) -> float:
@@ -71,8 +71,25 @@ def _pit(sim_vals: np.ndarray, actual: float, rng: np.random.Generator) -> float
     return float(lo + rng.random() * eq)   # randomised PIT for discrete outcomes
 
 
-PROPOSAL = 0.35                    # spread of match-day factors sampled during evaluation
-VOL_GRID = tuple(round(x, 3) for x in np.arange(0.0, 0.301, 0.025))
+PROPOSAL = 0.5                     # spread of match-day factors sampled during evaluation
+VOL_GRID = tuple(round(x, 3) for x in np.arange(0.0, 0.451, 0.025))
+MIN_STRATUM_SIMS = 25              # fewer held-out matches than this: use the pooled volatility
+
+
+def stratum_of(competition: str | None) -> str:
+    """Internationals (often associate sides, with wild swings) and franchise/domestic
+    leagues vary differently from match to match, so each gets its own volatility."""
+    if not competition:
+        return "all"
+    return "international" if competition == "T20I" else "club"
+
+
+def volatility_for(art, competition: str | None) -> float:
+    """The match-day volatility to simulate with (older artefacts store a single number)."""
+    v = getattr(art, "volatility", 0.0)
+    if isinstance(v, dict):
+        return float(v.get(stratum_of(competition), v.get("all", 0.0)))
+    return float(v)
 HELDOUT_MARKETS = ("total", "session6")
 
 
@@ -93,12 +110,13 @@ def simulate_heldout(model: BallModel, state: CricketState, m: BBMatch, n: int, 
             return None
         lineups[t] = Lineup(bat, bowl)
     setup = MatchSetup(m.pool, m.venue, m.teams, lineups, m.overs_limit, batting_first=m.batting_first,
-                       toss_winner=m.toss_winner)
+                       toss_winner=m.toss_winner, competition=m.competition)
     day = np.random.default_rng(seed + 10_000).normal(0.0, proposal, n) if proposal > 0 else None
     sim = simulate_match(model, state, setup, n=n, seed=seed, day=day)
     real = sim_from_match(m)
     first = m.batting_first
     out = {"match_id": m.match_id, "year": m.date.year, "seed": seed, "proposal": proposal,
+           "stratum": stratum_of(m.competition),
            "day": day if day is not None else np.zeros(n)}
     for key, spec in (("total", MarketSpec("team_total", team=first)),
                       ("session6", MarketSpec("session", team=first, overs=min(6, m.overs_limit)))):
@@ -179,39 +197,71 @@ def _crps_at(raw: list[dict], sigma: float, seed: int) -> float:
     return float(np.mean(vals)) if vals else float("inf")
 
 
-def fit_volatility(raw: list[dict], seed: int = 0) -> dict:
-    """Choose the match-day volatility, and report how it does on seasons it was not fitted on.
+def _best(raw: list[dict], seed: int) -> float:
+    return min(VOL_GRID, key=lambda s: _crps_at(raw, s, seed))
 
-    For each test season: fit the volatility on the other seasons' held-out matches (lowest
-    CRPS), then score that season with it. The cross-season scores are what the gate sees.
-    The volatility shipped with the model is the one fitted on every season.
+
+def fit_volatility(raw: list[dict], seed: int = 0) -> dict:
+    """Choose the match-day volatility for each stratum, and report it honestly.
+
+    For each test season and stratum: fit on the other seasons' held-out matches (lowest
+    CRPS), then score that season with it. Those cross-season scores are what the gate sees.
+    The volatilities shipped with the model are fitted on every season. A stratum with too
+    few held-out matches uses the pooled value.
     """
     rng = np.random.default_rng(seed)
     years = sorted({r["year"] for r in raw})
+    strata = sorted({r.get("stratum", "all") for r in raw})
+
+    def fitted(rows: list[dict], pooled: list[dict]) -> float:
+        return _best(rows, seed) if len(rows) >= MIN_STRATUM_SIMS else _best(pooled, seed)
+
     chosen: dict = {}
     scored: list[dict] = []
+    by_stratum: dict[str, list[dict]] = {}
     for yr in years:
-        train = [r for r in raw if r["year"] != yr] or [r for r in raw if r["year"] == yr]
-        best = min(VOL_GRID, key=lambda s: _crps_at(train, s, seed))
-        chosen[yr] = best
-        scored += [score_heldout(r, best, rng) for r in raw if r["year"] == yr]
-    final = min(VOL_GRID, key=lambda s: _crps_at(raw, s, seed))
+        others = [r for r in raw if r["year"] != yr] or raw
+        for st in strata:
+            here = [r for r in raw if r["year"] == yr and r.get("stratum", "all") == st]
+            if not here:
+                continue
+            sigma = fitted([r for r in others if r.get("stratum", "all") == st], others)
+            chosen[f"{yr}:{st}"] = sigma
+            sc = [score_heldout(r, sigma, rng) for r in here]
+            scored += sc
+            by_stratum.setdefault(st, []).extend(sc)
+    final = {"all": float(_best(raw, seed))}
+    for st in strata:
+        if st != "all":
+            final[st] = float(fitted([r for r in raw if r.get("stratum") == st], raw))
     rep = _summarise(scored)
     without = _summarise([score_heldout(r, 0.0, np.random.default_rng(seed)) for r in raw])
-    rep |= {"volatility": float(final), "volatility_by_season": {str(k): v for k, v in chosen.items()},
-            "total_coverage80_without_volatility": without.get("total_coverage80")}
+    rep |= {"volatility": final, "volatility_by_season": chosen,
+            "total_coverage80_without_volatility": without.get("total_coverage80"),
+            "by_stratum": {st: {k: v for k, v in _summarise(sc).items()
+                                if k in ("sim_matches", "total_coverage80", "session6_coverage80", "total_crps")}
+                           for st, sc in by_stratum.items()}}
     return rep
 
 
 def evaluate(matches: list[BBMatch], test_years: int = 3, kinds=("hgb", "logit"), max_iter: int = 150,
-             sims_per_year: int = 40, n_sims: int = 400, seed: int = 0, weather: dict | None = None) -> dict:
+             sims_per_year: int = 60, n_sims: int = 400, seed: int = 0, weather: dict | None = None) -> dict:
     years = sorted({m.date.year for m in matches})
     tests = years[-test_years:] if len(years) > test_years else years[1:]
     rng = np.random.default_rng(seed)
     sample: dict[int, list[int]] = {}
     for yr in tests:
-        idx = [i for i, m in enumerate(matches) if m.date.year == yr and len(m.innings) == 2]
-        sample[yr] = sorted(rng.choice(idx, size=min(sims_per_year, len(idx)), replace=False).tolist()) if idx else []
+        # half internationals, half leagues, so each stratum's volatility has enough matches
+        picks: list[int] = []
+        for st in ("international", "club"):
+            idx = [i for i, m in enumerate(matches)
+                   if m.date.year == yr and len(m.innings) == 2 and stratum_of(m.competition) == st]
+            k = min(sims_per_year // 2, len(idx))
+            picks += rng.choice(idx, size=k, replace=False).tolist() if k else []
+        if not picks:
+            idx = [i for i, m in enumerate(matches) if m.date.year == yr and len(m.innings) == 2]
+            picks = rng.choice(idx, size=min(sims_per_year, len(idx)), replace=False).tolist() if idx else []
+        sample[yr] = sorted(picks)
     snaps: dict = {}
     X, y, mi, dates, final_state = build_ball_dataset(
         matches, weather, snapshot_at={i for v in sample.values() for i in v}, snapshots=snaps)
@@ -290,7 +340,10 @@ class BallRegistry:
         meta = self.champion_meta()
         if not meta or not (self.root / meta["file"]).exists():
             return None
-        return joblib.load(self.root / meta["file"])   # only files this tool wrote itself
+        art = joblib.load(self.root / meta["file"])   # only files this tool wrote itself
+        if tuple(art.feature_names) != tuple(FEATURE_NAMES):
+            return None      # built for a different feature set: unusable until retrained
+        return art
 
     def record(self, art: BallArtifact, promoted: bool, reason: str) -> dict:
         meta = {"version": art.version, "file": f"ball-{art.version}.joblib",
@@ -314,7 +367,7 @@ class BallRegistry:
 
 
 def retrain_ball(matches: list[BBMatch], models_dir: str | Path, pools: tuple[str, ...], test_years: int = 3,
-                 kinds=("hgb", "logit"), max_iter: int = 150, sims_per_year: int = 40, n_sims: int = 400,
+                 kinds=("hgb", "logit"), max_iter: int = 150, sims_per_year: int = 60, n_sims: int = 400,
                  min_balls: int = MIN_BALLS, weather: dict | None = None) -> dict:
     """Evaluate, fit on everything, gate against the champion, register."""
     matches = [m for m in matches if m.pool in pools]
@@ -343,6 +396,6 @@ def retrain_ball(matches: list[BBMatch], models_dir: str | Path, pools: tuple[st
     ok, reason = gate(report, champ_meta, trained_through, recent, min_balls=min_balls)
     art = BallArtifact(datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"), choice.model, ev["state"],
                        trained_through, tuple(pools), tuple(FEATURE_NAMES), report,
-                       volatility=float(report.get("volatility", 0.0)))
+                       volatility=report.get("volatility", 0.0))
     meta = reg.record(art, ok, reason)
     return {"promoted": ok, "reason": reason, "report": report, "meta": meta}

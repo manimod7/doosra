@@ -104,3 +104,21 @@ def test_loader_skips_hundred_and_mislabelled_lengths(tmp_path, synth_zip):
             z.writestr(f"{name}.json", json.dumps(d))
     got = load_bb_matches(out, (f"{base['info']['match_type']}:{base['info'].get('gender', 'male')}",))
     assert [m.match_id for m in got] == ["ok"]
+
+
+def test_ground_names_merge_but_generic_names_keep_their_city():
+    from doosra.ballbyball import canonical_venue
+    assert canonical_venue("Wankhede Stadium, Mumbai", "Mumbai") == canonical_venue("Wankhede Stadium", None)
+    assert canonical_venue("M.Chinnaswamy Stadium", "Bangalore") == canonical_venue("M Chinnaswamy Stadium, Bengaluru", "Bengaluru")
+    assert canonical_venue("County Ground", "Taunton") != canonical_venue("County Ground, Chelmsford", "Chelmsford")
+    assert canonical_venue("National Stadium", "Karachi") != canonical_venue("National Stadium, Hamilton", "Hamilton")
+    assert canonical_venue(None) == "unknown"
+
+
+def test_competition_names_survive_sponsor_changes():
+    from doosra.ballbyball import competition_of
+    blast = {competition_of({"team_type": "club", "event": {"name": n}})
+             for n in ("NatWest T20 Blast", "Vitality Blast", "Vitality Blast Men")}
+    assert blast == {"T20 Blast"}
+    assert competition_of({"team_type": "international", "match_type": "T20", "event": {"name": "Asia Cup"}}) == "T20I"
+    assert competition_of({"team_type": "club", "event": {"name": "Indian Premier League"}}) == "Indian Premier League"

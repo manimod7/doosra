@@ -48,7 +48,7 @@ def download_cricsheet(name: str, dest_dir: str | Path, transport: httpx.BaseTra
 
 def cycle(data_path: str | Path, store: Store, models_dir: str | Path, pools: tuple[str, ...] = ("T20:male",),
           use_weather: bool = False, test_years: int = 3, kinds=("hgb", "logit"), max_iter: int = 150,
-          sims_per_year: int = 40, n_sims: int = 400, min_balls: int = MIN_BALLS,
+          sims_per_year: int = 60, n_sims: int = 400, min_balls: int = MIN_BALLS,
           retrain_winner_model: bool = True) -> dict:
     matches = load_bb_matches(data_path, pools)
     out: dict = {"matches": len(matches), "through": matches[-1].date.isoformat() if matches else None}

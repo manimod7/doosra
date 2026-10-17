@@ -9,7 +9,7 @@ so a batter with 12 balls of history is treated as "about average" instead
 of as a genius or a duck. Shrinkage strengths (balls of pseudo-evidence):
   players K_PLAYER, batter-v-bowler rivalries K_MATCHUP, venues K_VENUE.
 
-Feature vector per delivery (37 columns, see STATIC_NAMES + DYNAMIC_NAMES).
+Feature vector per delivery (38 columns, see STATIC_NAMES + DYNAMIC_NAMES).
 """
 from __future__ import annotations
 
@@ -26,12 +26,14 @@ K_MATCHUP = 30.0
 K_VENUE = 1500.0
 FORM_INNINGS = 10
 VENUE_PAR_N = 10
+COMP_PAR_N = 60          # recent first innings that set a competition's scoring level
+K_COMP = 15.0            # shrinkage (in innings) of that level towards the pool's rate
 
 RUNS = np.array(CLASS_RUNS, dtype=float)
 STATIC_NAMES = (
     [f"bat_{c}" for c in CLASS_NAMES] + [f"bowl_{c}" for c in CLASS_NAMES]
     + ["rivalry_runs", "rivalry_wkt", "bat_form", "bat_exp", "bowl_exp",
-       "venue_runs", "venue_wkt", "venue_par", "bat_won_toss",
+       "venue_runs", "venue_wkt", "venue_par", "comp_par", "bat_won_toss",
        "w_dew_spread", "w_humidity", "w_precip"]
 )
 DYNAMIC_NAMES = ["pp", "middle", "death", "over_frac", "wickets", "striker_balls", "inn2",
@@ -60,6 +62,8 @@ class CricketState:
     bowl_phase: dict = field(default_factory=dict)
     last_lineup: dict = field(default_factory=dict)
     venue_chase: dict = field(default_factory=dict)
+    comp_first: dict = field(default_factory=dict)    # (pool, competition) -> recent first-innings run rates
+    last_comp: dict = field(default_factory=dict)     # (pool, team) -> competition of its latest match
     matches_seen: int = 0
 
     # ---------------------------------------------------------- copies ---
@@ -72,7 +76,7 @@ class CricketState:
         """
         import copy
 
-        rel = {m.pool, m.venue, *m.teams}
+        rel = {m.pool, m.venue, *m.teams, *([m.competition] if m.competition else [])}
         for names in m.players.values():
             rel.update(names)
         for t in m.teams:
@@ -88,7 +92,7 @@ class CricketState:
 
         out = CricketState(matches_seen=self.matches_seen)
         for f in ("league", "bat", "bowl", "rivalry", "venue", "venue_first", "form", "bowl_phase",
-                  "last_lineup", "venue_chase"):
+                  "last_lineup", "venue_chase", "comp_first", "last_comp"):
             setattr(out, f, copy.deepcopy({k: v for k, v in getattr(self, f).items() if keep(k)}))
         return out
 
@@ -155,6 +159,21 @@ class CricketState:
             par = 1.0
         return (float(rates @ RUNS) / league_rpb - 1, math.log(rates[WICKET] / lr[WICKET]), math.log(par))
 
+    def comp_par(self, pool: str, competition: str | None) -> float:
+        """log of the competition's recent first-innings scoring rate vs the pool (0 = average).
+        Captures eras and leagues: the IPL since the impact-player rule scores well above
+        T20 cricket as a whole; many associate internationals score well below it."""
+        hist = self.comp_first.get((pool, competition)) if competition else None
+        if not hist:
+            return 0.0
+        league_rpb = float(self.league_rates(pool) @ RUNS)
+        return math.log((sum(hist) + K_COMP * league_rpb) / (len(hist) + K_COMP) / league_rpb)
+
+    def competition_for(self, pool: str, team_a: str, team_b: str) -> str | None:
+        """The competition two teams meet in: their shared latest competition, else None."""
+        a, b = self.last_comp.get((pool, team_a)), self.last_comp.get((pool, team_b))
+        return a if a and a == b else None
+
     def bowler_phase_share(self, pool: str, name: str) -> np.ndarray:
         c = self.bowl_phase.get((pool, name))
         if c is None:
@@ -197,8 +216,12 @@ class CricketState:
                 total = sum(b.runs for b in inn)
                 if legal > 0:
                     self.venue_first.setdefault(vk, deque(maxlen=VENUE_PAR_N)).append(total / legal)
+                    if m.competition:
+                        self.comp_first.setdefault((pool, m.competition), deque(maxlen=COMP_PAR_N)).append(total / legal)
         for team in m.teams:
             self.last_lineup[(pool, team)] = (m.batting_order(team)[:11], m.bowlers_used(team))
+            if m.competition:
+                self.last_comp[(pool, team)] = m.competition
         if m.winner and len(m.innings) == 2:
             w, n = self.venue_chase.get(vk, (0, 0))
             self.venue_chase[vk] = (w + (1 if m.winner != m.batting_first else 0), n + 1)
@@ -206,13 +229,14 @@ class CricketState:
 
 
 def static_features(state: CricketState, pool: str, venue: str, batter: str, bowler: str,
-                    bat_won_toss: bool, weather: dict | None) -> np.ndarray:
+                    bat_won_toss: bool, weather: dict | None, competition: str | None = None) -> np.ndarray:
     bv, form, bexp = state.batter_vec(pool, batter)
     wv, wexp = state.bowler_vec(pool, bowler)
     rr, rw = state.rivalry_vec(pool, batter, bowler)
     vr, vw, vpar = state.venue_vec(pool, venue)
     wx = weather or {}
-    return np.concatenate([bv, wv, [rr, rw, form, bexp, wexp, vr, vw, vpar, 1.0 if bat_won_toss else 0.0,
+    cpar = state.comp_par(pool, competition)
+    return np.concatenate([bv, wv, [rr, rw, form, bexp, wexp, vr, vw, vpar, cpar, 1.0 if bat_won_toss else 0.0,
                                     wx.get("dew_spread", np.nan), wx.get("humidity", np.nan),
                                     wx.get("precip", np.nan)]])
 
@@ -244,7 +268,7 @@ def match_rows(state: CricketState, m: BBMatch, weather: dict | None = None) -> 
             key = (b.batter, b.bowler, b.batting)
             if key not in cache:
                 cache[key] = static_features(state, m.pool, m.venue, b.batter, b.bowler,
-                                             m.toss_winner == b.batting, weather)
+                                             m.toss_winner == b.batting, weather, m.competition)
             rows_s.append(cache[key])
             dyn_cols.append([b.over, b.legal_before, wk, faced.get(b.batter, 0), inn_no == 2, score, target])
             y.append(b.outcome)

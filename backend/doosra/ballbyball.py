@@ -59,6 +59,7 @@ class BBMatch:
     innings: list[list[Ball]] = field(default_factory=list)
     batting_first: str | None = None
     target: int | None = None
+    competition: str | None = None     # "T20I", "Indian Premier League", ...
 
     @property
     def pool(self) -> str:
@@ -105,6 +106,40 @@ def classify(delivery: dict) -> tuple[int, int, int]:
     return {1: ONE, 2: TWO, 3: THREE, 4: FOUR, 5: FOUR, 6: SIX}[total], total, batter_runs
 
 
+# Names shared by different grounds: keep the city to tell them apart.
+GENERIC_GROUNDS = {"county ground", "national stadium", "queen's park", "gymkhana club ground"}
+# One competition, several sponsor names over the years.
+COMPETITION_ALIASES = {
+    "natwest t20 blast": "T20 Blast", "vitality blast": "T20 Blast", "vitality blast men": "T20 Blast",
+    "friends life t20": "T20 Blast", "friends provident t20": "T20 Blast",
+    "hrv cup": "Super Smash", "hrv twenty20": "Super Smash", "super smash": "Super Smash",
+    "csa t20 challenge": "CSA T20 Challenge", "miway t20 challenge": "CSA T20 Challenge", "csa pro20": "CSA T20 Challenge",
+    "the hundred men's competition": "The Hundred",
+}
+
+
+def canonical_venue(venue: str | None, city: str | None = None) -> str:
+    """One name per ground. Cricsheet writes 'Wankhede Stadium' and 'Wankhede Stadium, Mumbai',
+    'M.Chinnaswamy Stadium' and 'M Chinnaswamy Stadium, Bengaluru'; all of a ground's history
+    should count together. Generic names (County Ground, National Stadium) keep their city."""
+    raw = (venue or "unknown").strip()
+    base, _, rest = raw.partition(",")
+    base = " ".join(base.replace(".", " ").split())
+    if base.lower() in GENERIC_GROUNDS:
+        place = (city or rest.split(",")[0]).strip()
+        return f"{base}, {place}" if place else base
+    return base
+
+
+def competition_of(info: dict) -> str:
+    """'T20I' for internationals, else the event's name without years and sponsor changes."""
+    if info.get("team_type") == "international":
+        return "T20I" if info.get("match_type") in ("T20", "IT20") else str(info.get("match_type"))
+    name = str((info.get("event") or {}).get("name") or "unknown")
+    key = " ".join(w for w in name.replace("'", "'").split() if not w.isdigit()).lower()
+    return COMPETITION_ALIASES.get(key, " ".join(w for w in name.split() if not w.isdigit()))
+
+
 def parse_match(match_id: str, data: dict) -> BBMatch | None:
     info = data.get("info", {})
     teams = info.get("teams") or []
@@ -120,7 +155,7 @@ def parse_match(match_id: str, data: dict) -> BBMatch | None:
         date=date.fromisoformat(dates[0]),
         match_type=str(info.get("match_type", "unknown")),
         gender=str(info.get("gender", "male")),
-        venue=str(info.get("venue", "unknown")),
+        venue=canonical_venue(info.get("venue"), info.get("city")),
         city=info.get("city"),
         teams=(teams[0], teams[1]),
         toss_winner=toss.get("winner"),
@@ -129,6 +164,7 @@ def parse_match(match_id: str, data: dict) -> BBMatch | None:
         result=result,
         overs_limit=int(info.get("overs") or (20 if info.get("match_type") == "T20" else 50)),
         players={k: list(v) for k, v in (info.get("players") or {}).items()},
+        competition=competition_of(info),
     )
     regular = [inn for inn in data["innings"] if not inn.get("super_over")][:2]
     for idx, inn in enumerate(regular, start=1):

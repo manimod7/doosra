@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from . import feedback
 from . import modelsync
 from .analyzer import analyze
-from .lifecycle import BallRegistry
+from .lifecycle import BallRegistry, volatility_for
 from .markets import BookQuote
 from .props import MARKET_TYPES, MarketSpec, price, standard_card
 from .simulate import LiveState, Lineup, MatchSetup, default_setup, simulate_match
@@ -137,7 +137,7 @@ def register(app: FastAPI, store: Store, models_dir: str, require_admin, cricshe
         setup = setup_from(body)
         try:
             return setup, simulate_match(art().model, art().state, setup, n=body.sims, seed=body.seed, live=live,
-                                         volatility=getattr(art(), "volatility", 0.0))
+                                         volatility=volatility_for(art(), setup.competition))
         except ValueError as e:
             raise HTTPException(422, str(e))
 

@@ -11,7 +11,7 @@ from doosra.ballstate import (FEATURE_NAMES, K_PLAYER, N_FEATURES, CricketState,
 
 def test_feature_width_is_stable(dataset):
     X, *_ = dataset
-    assert X.shape[1] == N_FEATURES == len(FEATURE_NAMES) == 37
+    assert X.shape[1] == N_FEATURES == len(FEATURE_NAMES) == 38
 
 
 def test_features_are_leak_free(bb_matches):
@@ -112,3 +112,16 @@ def test_slim_state_simulates_exactly_like_the_full_state(bb_matches, logit_mode
             assert full[k] == slim[k], k
     assert len(slim_state.rivalry) < len(state.rivalry)
     assert len(slim_state.bat) < len(state.bat)
+
+
+def test_competition_level_tracks_a_high_scoring_league(bb_matches):
+    from dataclasses import replace
+    from doosra.ballstate import CricketState
+    state = CricketState()
+    for i, m in enumerate(bb_matches):
+        state.update(replace(m, competition="Flat League" if i % 2 else "Slow League"))
+    assert "Flat League" in {k[1] for k in state.comp_first}
+    # the synthetic league's Flat Deck games are spread over both, so just check the plumbing
+    assert state.comp_par("T20:male", None) == 0.0
+    assert state.comp_par("T20:male", "Never Played") == 0.0
+    assert state.competition_for("T20:male", *bb_matches[-1].teams) in ("Flat League", "Slow League", None)

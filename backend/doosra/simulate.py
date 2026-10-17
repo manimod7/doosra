@@ -54,6 +54,7 @@ class MatchSetup:
     batting_first: str | None = None     # known after the toss
     toss_winner: str | None = None
     weather: dict | None = None
+    competition: str | None = None       # sets the scoring level and the match-day volatility
 
 
 @dataclass
@@ -127,7 +128,8 @@ def simulate_innings(model: BallModel, state: CricketState, setup: MatchSetup, b
     nb, nw, overs = len(lineup), len(bowlers), setup.overs_limit
     quota = max(1, overs // 5)
     bat_won_toss = setup.toss_winner == batting
-    S = np.stack([np.stack([static_features(state, setup.pool, setup.venue, b, w, bat_won_toss, setup.weather)
+    S = np.stack([np.stack([static_features(state, setup.pool, setup.venue, b, w, bat_won_toss, setup.weather,
+                                                            setup.competition)
                             for w in bowlers]) for b in lineup])          # nb x nw x F_static
     shares = np.stack([state.bowler_phase_share(setup.pool, w) for w in bowlers])  # nw x 3
 
@@ -359,4 +361,5 @@ def default_setup(state: CricketState, pool: str, venue: str, team_a: str, team_
             raise ValueError(f"no lineup history for {t} in {pool}; supply the XI")
         bat, bowl = lu
         lineups[t] = Lineup(list(bat), list(bowl) or list(bat[-5:]))
+    kw.setdefault("competition", state.competition_for(pool, team_a, team_b))
     return MatchSetup(pool, venue, (team_a, team_b), lineups, overs_limit, **kw)
