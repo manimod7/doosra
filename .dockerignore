@@ -1,0 +1,12 @@
+frontend
+data
+backend/data
+backend/real
+backend/models
+backend/tests
+**/__pycache__
+**/.pytest_cache
+**/.env
+**/.env.*
+.git
+.github
