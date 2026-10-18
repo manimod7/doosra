@@ -198,7 +198,14 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 
 /* ------------------------------------------------------------- building blocks */
 
-.page { padding-top: 40px; display: grid; gap: 40px; }
+.page { padding-top: 40px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 40px; }
+/* grid and flex children may shrink below their content, so long names (Chennai Super Kings,
+   Royal Challengers Bengaluru) wrap or scroll inside their box instead of widening the page */
+.page > *, .section > *, .controls > *, .fc-main > *, .fc-side > * { min-width: 0; max-width: 100%; }
+.page header { grid-template-columns: minmax(0, 1fr); }
+.card > *, .inset > *, .list > *, .split > * { min-width: 0; }
+.row-main { min-width: 0; }
+.row-title { overflow-wrap: anywhere; }
 .section { display: grid; gap: 14px; }
 .section-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
 .section-head .t-head { font-size: 1.125rem; }
