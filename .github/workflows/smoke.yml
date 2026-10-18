@@ -1,0 +1,21 @@
+name: Smoke test
+
+# Click "Run workflow" after a deploy: checks the live API (and the dashboard, if its
+# secrets are set) end to end without writing anything.
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the deployment
+        env:
+          API_URL: ${{ secrets.DOOSRA_API_URL }}
+          TOKEN: ${{ secrets.DOOSRA_ADMIN_TOKEN }}
+          SITE_URL: ${{ secrets.DOOSRA_SITE_URL }}
+          SITE_PASSWORD: ${{ secrets.DOOSRA_DASHBOARD_PASSWORD }}
+        run: |
+          test -n "$API_URL" && test -n "$TOKEN" || { echo "Add the DOOSRA_API_URL and DOOSRA_ADMIN_TOKEN repository secrets"; exit 1; }
+          ./scripts/smoke.sh
