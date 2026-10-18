@@ -12,7 +12,7 @@ on:
 jobs:
   cycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 340    # ~75 min on 4 cores; GitHub's free 2-core runner takes roughly twice that
     defaults:
       run:
         working-directory: backend
