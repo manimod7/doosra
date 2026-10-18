@@ -39,8 +39,8 @@ The admin token protects everything that writes or spends Odds API credits; read
 
 1. **Actions → Learning cycle → Run workflow** (about 2 to 3 hours on GitHub's free runner). It downloads
    Cricsheet, trains, and stores the winning model in Neon.
-2. When it is green, open the Cloud Run service and **Edit & deploy new revision** (no changes) so the API
-   restarts and loads the model. A cold start after the service has slept does the same.
+2. Nothing to restart: the API checks the database for a newer model at most every 10 minutes and switches
+   to it on its own (and always loads the newest one when it starts).
 3. **Actions → Smoke test → Run workflow**. Every line should say PASS.
 
 After that, the learning cycle runs every Monday (03:10 IST) and odds refresh twice a day.

@@ -90,7 +90,18 @@ def _legal_balls(overs: float) -> int:
 
 def register(app: FastAPI, store: Store, models_dir: str, require_admin, cricsheet_path: str | None) -> None:
     feedback.init(store)
-    holder: dict = {"art": BallRegistry(models_dir).load(), "cal": feedback.load_calibrators(models_dir)}
+    watcher = modelsync.ModelWatcher(
+        store, models_dir, lambda d: {"art": BallRegistry(d).load(), "cal": feedback.load_calibrators(d)})
+
+    class _Holder(dict):
+        """Always the newest published model (see ModelWatcher); writes go to the watcher."""
+        def __getitem__(self, k):
+            return watcher.current()[k]
+
+        def __setitem__(self, k, v):
+            watcher.value = {**watcher.value, k: v}
+
+    holder = _Holder()
     job: dict = {"state": "idle"}
     lock = threading.Lock()
 

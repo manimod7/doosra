@@ -163,3 +163,38 @@ def test_database_url_is_used_when_doosra_db_is_unset(monkeypatch):
     assert db_target() == "local.sqlite"
     monkeypatch.delenv("DOOSRA_DB"); monkeypatch.delenv("DATABASE_URL")
     assert db_target() == "data/doosra.sqlite"
+
+
+def test_watcher_switches_to_a_newly_published_model(store, tmp_path):
+    """After the weekly cycle publishes a new champion, the API picks it up without a restart."""
+    import json
+    from doosra import modelsync
+    if not store.is_remote:
+        # the watcher only polls a shared database; on a local file it just holds what it loaded
+        w = modelsync.ModelWatcher(store, tmp_path / "m", lambda d: "local", interval=0)
+        assert w.current() == "local"
+        return
+    src = tmp_path / "src"
+    (src / "ball").mkdir(parents=True)
+
+    def publish(version):
+        (src / "ball" / f"ball-{version}.joblib").write_bytes(version.encode())
+        (src / "ball" / "champion.json").write_text(json.dumps({"file": f"ball-{version}.joblib", "version": version}))
+        modelsync.push(store, src)
+
+    def load(d):
+        p = d / "ball" / "champion.json"
+        return json.loads(p.read_text())["version"] if p.exists() else None
+
+    publish("v1")
+    now = [0.0]
+    live = tmp_path / "live"
+    modelsync.pull(store, live)
+    w = modelsync.ModelWatcher(store, live, load, interval=600, clock=lambda: now[0])
+    assert w.current() == "v1"
+    store._conn.execute("UPDATE artifacts SET updated_at = ? WHERE name = ?", ("2000-01-01T00:00:00+00:00", "ball/champion.json"))
+    w._stamp = "2000-01-01T00:00:00+00:00"
+    publish("v2")
+    assert w.current() == "v1"            # not yet: checks at most every interval
+    now[0] = 601
+    assert w.current() == "v2"

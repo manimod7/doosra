@@ -79,3 +79,44 @@ def pull(store: Store, models_dir: str | Path) -> dict:
         target.write_bytes(bytes(r["data"]))
         written.append(r["name"])
     return {"downloaded": sorted(written)}
+
+
+def stamp(store: Store) -> str | None:
+    """When the live champion was last published (None if nothing has been)."""
+    _init(store)
+    row = store._conn.execute("SELECT updated_at FROM artifacts WHERE name = ?", ("ball/champion.json",)).fetchone()
+    return row["updated_at"] if row else None
+
+
+class ModelWatcher:
+    """Keeps the API on the newest published model without a restart.
+
+    The weekly learning cycle publishes to the database; at most every `interval` seconds
+    the API checks the publish time and, if it changed, pulls the files and reloads.
+    `load(models_dir)` builds whatever the API keeps in memory (model, calibrators).
+    """
+
+    def __init__(self, store: Store, models_dir: str | Path, load, interval: float = 600.0, clock=None):
+        import threading
+        import time
+        self.store, self.models_dir, self._load, self.interval = store, Path(models_dir), load, interval
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._stamp = stamp(store) if store.is_remote else None
+        self._checked = self._clock()
+        self.value = load(self.models_dir)
+
+    def current(self):
+        if self.store.is_remote and self._clock() - self._checked >= self.interval:
+            with self._lock:
+                if self._clock() - self._checked >= self.interval:
+                    self._checked = self._clock()
+                    try:
+                        s = stamp(self.store)
+                        if s and s != self._stamp:
+                            pull(self.store, self.models_dir)
+                            self.value = self._load(self.models_dir)
+                            self._stamp = s
+                    except Exception:        # database asleep or unreachable: keep serving the loaded model
+                        pass
+        return self.value
